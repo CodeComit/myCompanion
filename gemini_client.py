@@ -1,25 +1,37 @@
-"""
-gemini_client.py — thin wrapper around the Gemini SDK.
-"""
-
 import logging
-import google.generativeai as genai
+from groq import Groq
 
-from config import GEMINI_API_KEY, GEMINI_MODEL, PERSONA
+from config import GROQ_API_KEY, GROQ_MODEL, PERSONA
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel(GEMINI_MODEL, system_instruction=PERSONA)
+_client = Groq(api_key=GROQ_API_KEY)
+
+
+def _to_groq_messages(history: list[dict]) -> list[dict]:
+    """db.get_history() returns [{"role": "user"/"model", "parts": [text]}, ...]
+    (that shape came from the old Gemini SDK). Groq/OpenAI-style chat
+    completions want [{"role": "user"/"assistant", "content": text}, ...],
+    so translate it here — db.py doesn't need to change."""
+    messages = [{"role": "system", "content": PERSONA}]
+    for turn in history:
+        role = "assistant" if turn["role"] == "model" else "user"
+        content = turn["parts"][0] if turn.get("parts") else ""
+        messages.append({"role": role, "content": content})
+    return messages
 
 
 def generate_reply(history: list[dict], user_message: str) -> str:
     try:
-        chat_session = _model.start_chat(history=history)
-        response = chat_session.send_message(user_message)
-        return response.text.strip()
+        messages = _to_groq_messages(history)
+        messages.append({"role": "user", "content": user_message})
+        response = _client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+        )
+        return response.choices[0].message.content.strip()
     except Exception:
-        logger.exception("Gemini API error")
+        logger.exception("Groq API error")
         return "Sorry, I hit a little glitch just now — could you say that again?"
 
 
@@ -28,7 +40,7 @@ def generate_proactive_message(history: list[dict]):
     time apart — not a reply to anything the user said. Returns None on
     failure so the caller can skip sending rather than surface an error."""
     try:
-        chat_session = _model.start_chat(history=history)
+        messages = _to_groq_messages(history)
         trigger = (
             "[Some hours have passed since you last talked. Reach out to "
             "them first, unprompted — like you were thinking about them. "
@@ -36,8 +48,12 @@ def generate_proactive_message(history: list[dict]):
             "your recent conversation if it fits, or just ask how their "
             "day's going / what they're up to.]"
         )
-        response = chat_session.send_message(trigger)
-        return response.text.strip()
+        messages.append({"role": "user", "content": trigger})
+        response = _client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+        )
+        return response.choices[0].message.content.strip()
     except Exception:
-        logger.exception("Gemini API error (proactive message)")
+        logger.exception("Groq API error (proactive message)")
         return None

@@ -1,4 +1,3 @@
-
 import os
 from dotenv import load_dotenv
 
@@ -18,11 +17,11 @@ def _require(name: str) -> str:
 
 # --- Required secrets ---
 TELEGRAM_TOKEN = _require("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = _require("GEMINI_API_KEY")
+GROQ_API_KEY = _require("GROQ_API_KEY")
 
 # --- Optional customization ---
 BOT_NAME = os.environ.get("BOT_NAME", "Anna")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "20"))
 RATE_LIMIT_SECONDS = float(os.environ.get("RATE_LIMIT_SECONDS", "1.5"))
 DB_PATH = os.environ.get("DB_PATH", "chat_memory.db")
