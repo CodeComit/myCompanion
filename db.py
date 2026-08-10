@@ -1,7 +1,6 @@
 """
-db.py — minimal SQLite persistence for per-user conversation memory.
-Kept intentionally simple: one table, four functions. Swap this out for
-Postgres/Redis later if you ever need multi-instance deployment.
+db.py — SQLite persistence for per-user conversation memory + proactive
+message tracking.
 """
 
 import sqlite3
@@ -17,9 +16,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,       -- 'user' or 'model'
+            role TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proactive_state (
+            user_id INTEGER PRIMARY KEY,
+            last_proactive_at REAL NOT NULL
         )
         """
     )
@@ -38,8 +45,6 @@ def save_message(user_id: int, role: str, content: str):
 
 
 def get_history(user_id: int, limit: int = MAX_HISTORY_MESSAGES):
-    """Return the last `limit` messages for this user, oldest first, in the
-    {"role": ..., "parts": [...]} shape the Gemini SDK expects."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
@@ -58,10 +63,51 @@ def clear_history(user_id: int):
 
 
 def purge_older_than(days: int):
-    """Optional housekeeping: delete messages older than N days.
-    Call this from a scheduled job if you want automatic data hygiene."""
     cutoff = time.time() - (days * 86400)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+
+def get_all_user_ids():
+    """All user_ids who have ever sent a message — used by the proactive
+    job when OWNER_USER_ID isn't set."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT DISTINCT user_id FROM messages").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_last_message_time(user_id: int):
+    """Timestamp of this user's most recent message (either direction), or
+    None if they've never messaged."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT MAX(created_at) FROM messages WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row and row[0] is not None else None
+
+
+def get_last_proactive_time(user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT last_proactive_at FROM proactive_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_last_proactive_time(user_id: int, ts: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO proactive_state (user_id, last_proactive_at) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET last_proactive_at = excluded.last_proactive_at
+        """,
+        (user_id, ts),
+    )
     conn.commit()
     conn.close()
