@@ -7,7 +7,7 @@ this module instead, so there's one place to see every setting the bot uses.
 import os
 from dotenv import load_dotenv
 
-load_dotenv()  
+load_dotenv()
 
 
 def _require(name: str) -> str:
@@ -38,6 +38,13 @@ DB_PATH = os.environ.get("DB_PATH", "chat_memory.db")
 # OWNER_USER_ID in .env. Leave unset to allow anyone to message the bot.
 _owner_id_raw = os.environ.get("OWNER_USER_ID", "").strip()
 OWNER_USER_ID = int(_owner_id_raw) if _owner_id_raw else None
+
+# --- Webhook settings (used when deploying on platforms like Render) ---
+# Render sets RENDER_EXTERNAL_URL automatically for web services — no manual
+# step needed there. Locally, or on platforms that don't set either var,
+# WEBHOOK_URL stays empty and bot.py falls back to polling mode.
+PORT = int(os.environ.get("PORT", "8080"))
+WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL")
 
 # --- Persona / system prompt ---
 DEFAULT_PERSONA = f"""You are {BOT_NAME}, a warm, emotionally intelligent, and
