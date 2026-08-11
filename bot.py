@@ -11,13 +11,14 @@ import uvicorn
 from config import (
     TELEGRAM_TOKEN, BOT_NAME, PORT, WEBHOOK_URL,
     OWNER_USER_ID, PROACTIVE_ENABLED, PROACTIVE_MIN_GAP_HOURS,
-    PROACTIVE_CHECK_INTERVAL_SECONDS,
+    PROACTIVE_CHECK_INTERVAL_SECONDS, SCHEDULE_CHECK_INTERVAL_SECONDS,
 )
 from db import (
     init_db, get_all_user_ids, get_last_message_time,
     get_last_proactive_time, set_last_proactive_time, get_history, save_message,
+    get_due_scheduled_messages, mark_scheduled_sent,
 )
-from gemini_client import generate_proactive_message
+from gemini_client import generate_proactive_message, generate_scheduled_message
 import handlers
 import time
 
@@ -63,6 +64,29 @@ async def check_and_send_proactive(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Sent proactive message to {user_id}")
         except Exception:
             logger.exception(f"Failed to send proactive message to {user_id}")
+
+
+async def check_scheduled_messages(context: ContextTypes.DEFAULT_TYPE):
+    """Runs frequently (default every 60s). Sends any user-requested
+    'text me at X time' messages whose time has arrived."""
+    now = time.time()
+    due = get_due_scheduled_messages(now)
+
+    for schedule_id, user_id, note in due:
+        history = get_history(user_id)
+        message = generate_scheduled_message(history, note)
+        if not message:
+            # don't retry forever on a generation failure
+            mark_scheduled_sent(schedule_id)
+            continue
+
+        try:
+            await context.bot.send_message(chat_id=user_id, text=message)
+            save_message(user_id, "model", message)
+            mark_scheduled_sent(schedule_id)
+            logger.info(f"Sent scheduled message to {user_id}")
+        except Exception:
+            logger.exception(f"Failed to send scheduled message to {user_id}")
 
 
 async def _run_webhook_server(app: Application):
@@ -136,6 +160,17 @@ def main():
         logger.warning(
             "PROACTIVE_ENABLED is true but job_queue is unavailable — "
             "check that requirements.txt includes the [job-queue] extra."
+        )
+
+    if app.job_queue:
+        app.job_queue.run_repeating(
+            check_scheduled_messages,
+            interval=SCHEDULE_CHECK_INTERVAL_SECONDS,
+            first=30,
+        )
+        logger.info(
+            f"'Text me at X time' feature enabled (checks every "
+            f"{SCHEDULE_CHECK_INTERVAL_SECONDS}s)"
         )
 
     if WEBHOOK_URL:

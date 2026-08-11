@@ -26,10 +26,26 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS proactive_state (
             user_id INTEGER PRIMARY KEY,
-            last_proactive_at REAL NOT NULL
+            last_proactive_at REAL NOT NULL,
+            next_due_at REAL
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            run_at REAL NOT NULL,
+            note TEXT,
+            sent INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    # migration for DBs created before next_due_at existed
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(proactive_state)").fetchall()]
+    if "next_due_at" not in cols:
+        conn.execute("ALTER TABLE proactive_state ADD COLUMN next_due_at REAL")
     conn.commit()
     conn.close()
 
@@ -109,5 +125,61 @@ def set_last_proactive_time(user_id: int, ts: float):
         """,
         (user_id, ts),
     )
+    conn.commit()
+    conn.close()
+
+
+def get_next_due_time(user_id: int):
+    """When the next random check-in is scheduled for this user, or None
+    if nothing's scheduled yet (bot.py will schedule one)."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT next_due_at FROM proactive_state WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row and row[0] is not None else None
+
+
+def set_next_due_time(user_id: int, ts: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO proactive_state (user_id, last_proactive_at, next_due_at)
+        VALUES (?, 0, ?)
+        ON CONFLICT(user_id) DO UPDATE SET next_due_at = excluded.next_due_at
+        """,
+        (user_id, ts),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_scheduled_message(user_id: int, run_at: float, note: str = ""):
+    """Store a one-off "message me at X time" request from the user."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO scheduled_messages (user_id, run_at, note, sent) VALUES (?, ?, ?, 0)",
+        (user_id, run_at, note),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_due_scheduled_messages(now: float):
+    """Every unsent scheduled message whose time has arrived, across all
+    users — checked by a small periodic job in bot.py."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, user_id, note FROM scheduled_messages WHERE sent = 0 AND run_at <= ?",
+        (now,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_scheduled_sent(schedule_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE scheduled_messages SET sent = 1 WHERE id = ?", (schedule_id,))
     conn.commit()
     conn.close()

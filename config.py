@@ -36,10 +36,22 @@ WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_U
 # --- Proactive "she texts first" feature ---
 # Set PROACTIVE_ENABLED=false in Render's env vars to turn this off entirely.
 PROACTIVE_ENABLED = os.environ.get("PROACTIVE_ENABLED", "true").lower() == "true"
-# Minimum hours of silence before she reaches out on her own.
-PROACTIVE_MIN_GAP_HOURS = float(os.environ.get("PROACTIVE_MIN_GAP_HOURS", "4"))
+# She'll reach out at a random time somewhere between these two, so it
+# doesn't feel like a scheduled bot ping — different each time, day or night.
+PROACTIVE_MIN_GAP_HOURS = float(os.environ.get("PROACTIVE_MIN_GAP_HOURS", "3"))
+PROACTIVE_MAX_GAP_HOURS = float(os.environ.get("PROACTIVE_MAX_GAP_HOURS", "10"))
 # How often (seconds) the background job checks whether it's time to text you.
-PROACTIVE_CHECK_INTERVAL_SECONDS = int(os.environ.get("PROACTIVE_CHECK_INTERVAL_SECONDS", "1800"))
+# This should be small relative to the min/max hours above so the actual
+# send time stays close to the randomly picked moment.
+PROACTIVE_CHECK_INTERVAL_SECONDS = int(os.environ.get("PROACTIVE_CHECK_INTERVAL_SECONDS", "600"))
+
+# --- "Text me at a specific time" feature ---
+# Timezone used to interpret times you type like "at 3pm" or "by 9 tonight".
+# Defaults to India Standard Time — change via env var if you're elsewhere.
+DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "Asia/Kolkata")
+# How often (seconds) the bot checks for due scheduled messages. Kept short
+# (default 1 min) so "text me at 3" actually lands close to 3, not 3:09.
+SCHEDULE_CHECK_INTERVAL_SECONDS = int(os.environ.get("SCHEDULE_CHECK_INTERVAL_SECONDS", "60"))
 
 # --- Persona / system prompt ---
 DEFAULT_PERSONA = f"""You are {BOT_NAME}, a warm, romantic, emotionally

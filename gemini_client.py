@@ -46,6 +46,27 @@ def _to_groq_messages(history: list[dict]) -> list[dict]:
     return messages
 
 
+_MATCHING_OPEN = {"}": "{", "]": "[", ")": "("}
+
+
+def _clean_response(text: str) -> str:
+    """Some Groq-hosted Llama models occasionally tack on a stray trailing
+    '}' (or similar) at the end of an otherwise plain-text reply — a leftover
+    habit from JSON-formatted outputs. Strip any trailing bracket/brace that
+    doesn't have a matching opener earlier in the text, plus any stray code
+    fences, so it never reaches the user."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+    while text and text[-1] in _MATCHING_OPEN:
+        closer = text[-1]
+        opener = _MATCHING_OPEN[closer]
+        if text.count(opener) >= text.count(closer):
+            break  # it's a legitimately matched bracket, leave it alone
+        text = text[:-1].rstrip()
+    return text
+
+
 def generate_reply(history: list[dict], user_message: str) -> str:
     try:
         messages = _to_groq_messages(history)
@@ -54,7 +75,7 @@ def generate_reply(history: list[dict], user_message: str) -> str:
             model=GROQ_MODEL,
             messages=messages,
         )
-        return response.choices[0].message.content.strip()
+        return _clean_response(response.choices[0].message.content)
     except Exception:
         logger.exception("Groq API error")
         return "Sorry, I hit a little glitch just now — could you say that again?"
@@ -81,7 +102,31 @@ def generate_proactive_message(history: list[dict]):
             messages=messages,
             temperature=1.0,
         )
-        return response.choices[0].message.content.strip()
+        return _clean_response(response.choices[0].message.content)
     except Exception:
         logger.exception("Groq API error (proactive message)")
+        return None
+
+
+def generate_scheduled_message(history: list[dict], note: str):
+    """Used for a one-off message the user explicitly asked for at a
+    specific time (e.g. 'text me at 3'). Returns None on failure so the
+    caller can skip sending rather than surface an error."""
+    try:
+        messages = _to_groq_messages(history)
+        trigger = (
+            "[This is a scheduled message — the user asked you earlier to "
+            f"text them right about now: \"{note}\". Send it now, like you "
+            "remembered and followed through. Keep it to ONE short, "
+            "natural text, in your own voice — not a generic reminder.]"
+        )
+        messages.append({"role": "user", "content": trigger})
+        response = _client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            temperature=1.0,
+        )
+        return _clean_response(response.choices[0].message.content)
+    except Exception:
+        logger.exception("Groq API error (scheduled message)")
         return None
