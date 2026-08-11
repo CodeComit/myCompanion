@@ -1,7 +1,12 @@
 import logging
+import asyncio
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse, Response
+from starlette.routing import Route
+import uvicorn
 
 from config import (
     TELEGRAM_TOKEN, BOT_NAME, PORT, WEBHOOK_URL,
@@ -60,10 +65,56 @@ async def check_and_send_proactive(context: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Failed to send proactive message to {user_id}")
 
 
+async def _run_webhook_server(app: Application):
+    """Runs the bot's webhook via a small custom Starlette server (instead
+    of PTB's built-in run_webhook) so we can add a /health route.
+
+    Why: PTB's built-in webhook server ONLY answers POST requests at
+    /{TELEGRAM_TOKEN} (that's how Telegram delivers updates). Uptime
+    monitors like UptimeRobot send a plain GET to your root URL to check
+    you're alive — that gets a 404 from the built-in server even though the
+    bot is running fine, which makes UptimeRobot falsely report "Down".
+    Point your UptimeRobot monitor at https://<your-app>.onrender.com/health
+    instead of the root URL to fix this.
+    """
+
+    async def telegram_webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.update_queue.put(update)
+        return Response()
+
+    async def health(_request):
+        return PlainTextResponse("OK")
+
+    starlette_app = Starlette(
+        routes=[
+            Route(f"/{TELEGRAM_TOKEN}", telegram_webhook, methods=["POST"]),
+            Route("/health", health, methods=["GET"]),
+        ]
+    )
+
+    async with app:
+        await app.bot.set_webhook(
+            url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+            allowed_updates=Update.ALL_TYPES,
+        )
+        await app.start()
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app=starlette_app, host="0.0.0.0", port=PORT, log_level="info"
+            )
+        )
+        try:
+            await server.serve()
+        finally:
+            await app.stop()
+
+
 def main():
     init_db()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).updater(None).build()
 
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("help", handlers.help_cmd))
@@ -89,13 +140,7 @@ def main():
 
     if WEBHOOK_URL:
         logger.info(f"{BOT_NAME} is starting (webhook mode) on port {PORT}...")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TELEGRAM_TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-            allowed_updates=Update.ALL_TYPES,
-        )
+        asyncio.run(_run_webhook_server(app))
     else:
         logger.info(f"{BOT_NAME} is starting (polling mode)...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
