@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import random
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -11,11 +12,13 @@ import uvicorn
 from config import (
     TELEGRAM_TOKEN, BOT_NAME, PORT, WEBHOOK_URL,
     OWNER_USER_ID, PROACTIVE_ENABLED, PROACTIVE_MIN_GAP_HOURS,
-    PROACTIVE_CHECK_INTERVAL_SECONDS, SCHEDULE_CHECK_INTERVAL_SECONDS,
+    PROACTIVE_MAX_GAP_HOURS, PROACTIVE_CHECK_INTERVAL_SECONDS,
+    SCHEDULE_CHECK_INTERVAL_SECONDS,
 )
 from db import (
     init_db, get_all_user_ids, get_last_message_time,
-    get_last_proactive_time, set_last_proactive_time, get_history, save_message,
+    set_last_proactive_time, get_next_due_time, set_next_due_time,
+    get_history, save_message,
     get_due_scheduled_messages, mark_scheduled_sent,
 )
 from gemini_client import generate_proactive_message, generate_scheduled_message
@@ -30,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 
 async def check_and_send_proactive(context: ContextTypes.DEFAULT_TYPE):
-    """Runs periodically. If it's been long enough since a user last
-    messaged (and long enough since she last reached out to them), send an
-    unprompted, in-character message."""
+    """Runs periodically (default every 10 min). Each user gets a randomly
+    picked 'next check-in time' somewhere between PROACTIVE_MIN_GAP_HOURS
+    and PROACTIVE_MAX_GAP_HOURS after their last message. Once that time
+    arrives, she reaches out — then a fresh random target is picked."""
     user_ids = [OWNER_USER_ID] if OWNER_USER_ID else get_all_user_ids()
     now = time.time()
+    logger.info(f"[proactive] checking {len(user_ids)} user(s)")
 
     for user_id in user_ids:
         if user_id is None:
@@ -44,13 +49,21 @@ async def check_and_send_proactive(context: ContextTypes.DEFAULT_TYPE):
         if last_msg is None:
             continue  # never talked to this user, nothing to follow up on
 
-        gap_hours = (now - last_msg) / 3600
-        if gap_hours < PROACTIVE_MIN_GAP_HOURS:
+        next_due = get_next_due_time(user_id)
+        if next_due is None or next_due < last_msg:
+            # no target yet, or the target is stale (a newer message came
+            # in since it was set) — pick a fresh random one and wait
+            gap_hours = random.uniform(PROACTIVE_MIN_GAP_HOURS, PROACTIVE_MAX_GAP_HOURS)
+            next_due = last_msg + gap_hours * 3600
+            set_next_due_time(user_id, next_due)
+            logger.info(
+                f"[proactive] scheduled next check-in for {user_id} in "
+                f"{gap_hours:.2f}h (at {time.strftime('%Y-%m-%d %H:%M', time.localtime(next_due))})"
+            )
             continue
 
-        last_proactive = get_last_proactive_time(user_id)
-        if last_proactive and (now - last_proactive) / 3600 < PROACTIVE_MIN_GAP_HOURS:
-            continue  # already reached out recently, don't spam
+        if now < next_due:
+            continue  # not due yet
 
         history = get_history(user_id)
         message = generate_proactive_message(history)
@@ -61,9 +74,11 @@ async def check_and_send_proactive(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_id, text=message)
             save_message(user_id, "model", message)
             set_last_proactive_time(user_id, now)
-            logger.info(f"Sent proactive message to {user_id}")
+            gap_hours = random.uniform(PROACTIVE_MIN_GAP_HOURS, PROACTIVE_MAX_GAP_HOURS)
+            set_next_due_time(user_id, now + gap_hours * 3600)
+            logger.info(f"[proactive] sent to {user_id}, next in {gap_hours:.2f}h")
         except Exception:
-            logger.exception(f"Failed to send proactive message to {user_id}")
+            logger.exception(f"[proactive] failed to send to {user_id}")
 
 
 async def check_scheduled_messages(context: ContextTypes.DEFAULT_TYPE):

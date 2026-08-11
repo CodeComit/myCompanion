@@ -8,10 +8,9 @@ import re
 import time
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-import dateparser
-from dateparser.search import search_dates
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
@@ -25,6 +24,8 @@ logger = logging.getLogger(__name__)
 # simple in-memory per-user cooldown to avoid spam / runaway API costs
 _last_message_time: dict[int, float] = defaultdict(float)
 
+_TZ = ZoneInfo(DEFAULT_TIMEZONE)
+
 # Only try to parse a time out of the message if it looks like a request
 # to be messaged later — avoids misreading ordinary chat ("I woke up at 3")
 # as a scheduling request.
@@ -34,33 +35,79 @@ _SCHEDULE_TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 
-_DATEPARSER_SETTINGS = {
-    "PREFER_DATES_FROM": "future",
-    "TIMEZONE": DEFAULT_TIMEZONE,
-    "RETURN_AS_TIMEZONE_AWARE": True,
-}
+# "in 20 minutes", "in 2 hours"
+_RELATIVE_RE = re.compile(
+    r"\bin\s+(\d+)\s*(minute|min|hour|hr)s?\b", re.IGNORECASE
+)
+
+# "at 2:35", "at 2:35pm", "at 9 am", "at 21:00"
+_CLOCK_TIME_RE = re.compile(
+    r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE
+)
+
+
+def _resolve_clock_time(now: datetime, hour: int, minute: int, meridiem: str | None, night: bool):
+    """Turn an hour/minute (possibly ambiguous, e.g. '2:35' with no am/pm)
+    into a concrete future datetime — always the NEXT real occurrence,
+    never a random/far-off date."""
+    if meridiem:
+        meridiem = meridiem.lower()
+        if meridiem == "pm" and hour != 12:
+            hour = (hour % 12) + 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        candidates = [now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)]
+    elif night and 1 <= hour <= 11:
+        # "tonight at 9" -> clearly PM even without saying so
+        candidates = [now.replace(hour=hour + 12, minute=minute, second=0, microsecond=0)]
+    elif 1 <= hour <= 12:
+        # genuinely ambiguous ("at 2:35") — consider both AM and PM, and
+        # pick whichever is soonest without being in the past
+        h_am = hour % 12
+        h_pm = (hour % 12) + 12
+        candidates = [
+            now.replace(hour=h_am, minute=minute, second=0, microsecond=0),
+            now.replace(hour=h_pm, minute=minute, second=0, microsecond=0),
+        ]
+    else:
+        # 0 or 13-23 -> unambiguous 24-hour value
+        candidates = [now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)]
+
+    future = [c for c in candidates if c > now]
+    if future:
+        return min(future)
+    # every candidate for "today" has already passed -> next day
+    return min(candidates) + timedelta(days=1)
 
 
 def _try_parse_schedule_request(text: str):
     """If the message looks like 'text me at 3' / 'remind me at 9pm
-    tonight' / 'message me in 20 minutes', return the timezone-aware
-    datetime it resolves to. Otherwise return None so the message falls
-    through to a normal chat reply."""
+    tonight' / 'message me in 20 minutes', return the datetime it resolves
+    to (always in the future, always the next real occurrence). Otherwise
+    return None so the message falls through to a normal chat reply."""
     if not _SCHEDULE_TRIGGER_RE.search(text):
         return None
-    try:
-        results = search_dates(text, settings=_DATEPARSER_SETTINGS)
-    except Exception:
-        logger.exception("dateparser failed on: %r", text)
-        return None
-    if not results:
-        return None
-    # last date-like phrase in the message is usually the intended one
-    # ("text me at 3" -> the "3" match)
-    _, dt = results[-1]
-    if dt <= datetime.now(dt.tzinfo):
-        return None  # parsed to a time already in the past, ignore
-    return dt
+
+    now = datetime.now(_TZ)
+
+    m = _RELATIVE_RE.search(text)
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2).lower()
+        delta = timedelta(minutes=amount) if unit.startswith("min") else timedelta(hours=amount)
+        return now + delta
+
+    m = _CLOCK_TIME_RE.search(text)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2)) if m.group(2) else 0
+        meridiem = m.group(3)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        night = bool(re.search(r"\btonight\b", text, re.IGNORECASE))
+        return _resolve_clock_time(now, hour, minute, meridiem, night)
+
+    return None  # trigger phrase present but no recognizable time -> just chat normally
 
 
 def _is_authorized(user_id: int) -> bool:
